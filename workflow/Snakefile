@@ -1,4 +1,5 @@
 configfile: "config.yml"
+import gzip
 import csv
 from collections import defaultdict
 from pprint import pprint
@@ -6,7 +7,7 @@ from pprint import pprint
 rl2s = {}
 s2rl = defaultdict(list)
 rl2fq = {}
-with open("Ana/manifest_2025-03-24.tsv") as fh:
+with gzip.open("manifest_2025-04-09.tsv", "rt") as fh:
     for fq in csv.DictReader(fh, dialect="excel-tab"):
         r, l, s = fq["run"], fq["library"], fq["sample"]
         def F(p):
