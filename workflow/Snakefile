@@ -1,0 +1,51 @@
+configfile: "config.yml"
+import csv
+from collections import defaultdict
+from pprint import pprint
+
+rl2s = {}
+s2rl = defaultdict(list)
+rl2fq = {}
+with open("Ana/manifest_2025-03-24.tsv") as fh:
+    for fq in csv.DictReader(fh, dialect="excel-tab"):
+        r, l, s = fq["run"], fq["library"], fq["sample"]
+        def F(p):
+            if config.get("fastq_rootdir"):
+                return Path(config.get("fastq_rootdir"))  / p
+            return p
+        rl2s[(r, l)] = s
+        rl2fq[(r, l)] = (F(fq["read1_uri"]), F(fq["read2_uri"]))
+        s2rl[s].append((r,l))
+s2rl = dict(s2rl)
+config["RAWDATA_PATHS"] = rl2fq
+
+print(f"{len(rl2fq)} runs of libraries, belonging to {len(s2rl)} samples")
+container: "docker://ghcr.io/kdm9/rnana2:latest"
+
+wildcard_constraints:
+    run="[^/~]+",
+    lib="[^/~]+",
+    reference="[^/~]+",
+    sample="[^/~]+",
+    aligner="[^/~]+",
+
+include: "rules/qc.rules"
+include: "rules/map.rules"
+include: "rules/count.rules"
+
+rule everyting_snakemake_has_to_do:
+    input:
+        qcd_fastqs=[
+            f"tmp/reads/qc/{run}~{lib}_r12.fastq.gz"
+            for run, lib in rl2s
+        ],
+        all_bam=[
+            f"output/counts/{aligner}_{reference}.counts.tsv"
+            for reference in config["map_to"]
+            for aligner in config["map_with"]
+        ],
+        counts=[
+            f"output/counts/{aligner}_{reference}.counts.tsv"
+            for reference in config["map_to"]
+            for aligner in config["map_with"]
+        ],
