@@ -1,0 +1,20 @@
+data_paths:
+  fastq_rootdir: /ebio/abt6_sra/years/
+  references:
+    Araport11:
+      fasta: rawdata/references/araport11/TAIR10_chr_all.fas
+      gtf:  rawdata/references/araport11/Araport11_GTF_genes_transposons.current.gtf
+
+map_to:
+  - Araport11
+map_with:
+  - bowtie2
+max_reads: 20000000  # 20 million based on Wei's plotting this seems reasonable (2025-04-01)
+
+tool_settings:
+  adapterremoval:
+    adapter_file: "rawdata/adapters.txt"
+    minqual: 20
+    qualenc: 33
+    maxqualval: 90
+  ziplevel: 8

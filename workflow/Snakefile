@@ -1,52 +1,211 @@
 configfile: "config.yml"
 import gzip
 import csv
+import re
 from collections import defaultdict
 from pprint import pprint
+from sys import exit
 
-rl2s = {}
-s2rl = defaultdict(list)
-rl2fq = {}
-with gzip.open("manifest_2025-04-09.tsv", "rt") as fh:
+def FQ(p):
+    rt = config.get("data_paths", {}).get("fastq_rootdir")
+    if rt:
+        return Path(rt) / p
+    return p
+
+config["RAWDATA_PATHS"] = dict()
+config["SAMPLE_TO_RUNLIB"] = defaultdict(list)
+config["SAMPLE_NREADS"] = defaultdict(int)
+with gzip.open("manifest_2025-04-09.tsv.gz", "rt") as fh:
     for fq in csv.DictReader(fh, dialect="excel-tab"):
-        r, l, s = fq["run"], fq["library"], fq["sample"]
-        def F(p):
-            if config.get("fastq_rootdir"):
-                return Path(config.get("fastq_rootdir"))  / p
-            return p
-        rl2s[(r, l)] = s
-        rl2fq[(r, l)] = (F(fq["read1_uri"]), F(fq["read2_uri"]))
-        s2rl[s].append((r,l))
-s2rl = dict(s2rl)
-config["RAWDATA_PATHS"] = rl2fq
+        run, lib, sample = fq["run"], fq["library"], fq["sample"]
+        config["RAWDATA_PATHS"][(run, lib)] = {
+                "r1": FQ(fq["read1_uri"]),
+                "r2": FQ(fq["read2_uri"]),
+        }
 
-print(f"{len(rl2fq)} runs of libraries, belonging to {len(s2rl)} samples")
+        config["SAMPLE_TO_RUNLIB"][sample].append((run, lib))
+        config["SAMPLE_NREADS"][sample] += float(fq["estimated_n_reads"])
+
+#pprint(config)
 container: "docker://ghcr.io/kdm9/rnana2:latest"
+
+print(f"{len(config['RAWDATA_PATHS'])} runs of libraries, belonging to {len(config['SAMPLE_TO_RUNLIB'])} samples")
+
+rule everything_snakemake_has_to_do:
+    input:
+        counts=[
+                f"tmp/rsem/RNAna_counts_{reference}.matrix"
+                for reference in config["map_to"]
+        ],
+
+rule seqtk_sample:
+    input:
+        #finds the R1 and R2 of every library(sample) and per each run. Refers to the config file for the path and the wildcards
+        r1=lambda wc: [
+                config["RAWDATA_PATHS"][(run, lib)]["r1"]
+                for run, lib in config["SAMPLE_TO_RUNLIB"][wc.sample]
+        ],
+        r2=lambda wc: [
+                config["RAWDATA_PATHS"][(run, lib)]["r2"]
+                for run, lib in config["SAMPLE_TO_RUNLIB"][wc.sample]
+        ],
+    output:
+        r1_down="tmp/reads/{sample}_r1_down.fastq.gz", # #it saves each read (raw or downsampled) in temp/global2.
+        r2_down="tmp/reads/{sample}_r2_down.fastq.gz",
+    log:
+        "tmp/reads/{sample}_r2_down.fastq.gz.log",
+    resources:
+        runtime=120,
+        mem_gb=24,
+    threads: 4, 
+    params:
+        max_reads=int(config.get("max_reads", 2**63-1)), # Bash can only represent up to a signed 64bit int, so we use this to mean "wayy too many reads"
+        thissamp_reads=lambda wc: int(config["SAMPLE_NREADS"][wc.sample]),
+        ziplevel=config.get("tool_settings", {}).get('ziplevel', 6),
+    shell: 
+        """
+        if [[ {params.thissamp_reads} -gt {params.max_reads} ]]
+        then
+            zcat {input.r1} | seqtk sample -s {params.thissamp_reads} - {params.max_reads} | pigz -{params.ziplevel} -p {threads} > {output.r1_down}
+            zcat {input.r2} | seqtk sample -s {params.thissamp_reads} - {params.max_reads} | pigz -{params.ziplevel} -p {threads} > {output.r2_down}
+        else
+            cat {input.r1} > {output.r1_down}
+            cat {input.r2} > {output.r2_down}
+        fi
+        """
+
+rule qcreads_paired_r12:
+    input:
+        # now it will go to the output directory of the previous step
+        # /tmp/global2/reads/ to get the mix of raw files with downsampled ones
+        # for QC
+        r1="tmp/reads/{sample}_r1_down.fastq.gz",
+        r2="tmp/reads/{sample}_r2_down.fastq.gz",
+    output:
+        r1="tmp/reads/qc/{sample}_r1_qc.fastq.gz",
+        r2="tmp/reads/qc/{sample}_r2_qc.fastq.gz",
+        rs="tmp/reads/qc/{sample}_rs_qc.fastq.gz",
+        settings="tmp/reads/qc/{sample}_r12.settings"
+    log: "tmp/reads/qc/{sample}_r12.fastq.log", #save a log file of the QC
+    resources:
+        runtime=720,
+        mem_gb=16,
+    threads: 8
+    params:
+        adpfile=lambda wc: config["tool_settings"]["adapterremoval"]["adapter_file"],
+        minqual=lambda wc: config["tool_settings"]["adapterremoval"]["minqual"],
+        qualenc=lambda wc: config["tool_settings"]["adapterremoval"]["qualenc"],
+        maxqualval=lambda wc: config["tool_settings"]["adapterremoval"]["maxqualval"],
+        ziplevel=config.get("tool_settings", {}).get('ziplevel', 6),
+    shell:
+        "( AdapterRemoval"
+        "   --file1 {input.r1}"
+        "   --file2 {input.r2}"
+        "   --gzip"
+        "   --gzip-level {params.ziplevel}"
+        "   --output1 {output.r1}"
+        "   --output2 {output.r2}"
+        "   --singleton {output.rs}"
+        "   --outputcollapsed {output.rs}"
+        "   --outputcollapsedtruncated {output.rs}"
+        "   --discarded /dev/null"
+        "   --adapter-list {params.adpfile}"
+        "   --trimns"
+        "   --trimqualities"
+        "   --trimwindows 10"
+        "   --qualitymax {params.maxqualval}"
+        "   --qualitybase {params.qualenc}"
+        "   --qualitybase-output 33"
+        "   --minquality {params.minqual}"
+        "   --threads {threads}"
+        "   --settings {output.settings}"
+        ") >{log} 2>&1"
+
+
+rule prepare_reference:
+    input:
+        ref_fa=lambda wc: config["data_paths"]["references"][wc.reference]["fasta"], #refer to the config file to get the reference fasta file
+        annot=lambda wc: config["data_paths"]["references"][wc.reference]["gtf"], #refer to the config file to get the annotation gtf file
+    output:
+        ref_seq="tmp/rsem_refs/{reference}.seq",
+        ref_idxfa="tmp/rsem_refs/{reference}.idx.fa",
+    log:
+        "tmp/rsem_refs/{reference}.log", #save a log file of the REFERENCE INDEXING
+    resources:
+        runtime=60,
+        mem_gb=32,
+    threads: 8
+    params:
+        ref_basename=lambda wc, input, output: re.sub(r"\.seq", "", output.ref_seq)
+    shell: #it uses the prepare reference command to index the reference genome
+        "( rsem-prepare-reference"
+        "   --num-threads {threads}"
+        "   --gtf {input.annot}"
+        "   --bowtie2"
+        "   {input.ref_fa}"
+        "   {params.ref_basename}"
+        ")&>{log}"
+
+rule calculate_expression:
+    input:
+        r1="tmp/reads/qc/{sample}_r1_qc.fastq.gz",
+        r2="tmp/reads/qc/{sample}_r2_qc.fastq.gz",
+        ref_seq="tmp/rsem_refs/{reference}.seq",
+    output:
+        #file containing gene level expression estimates (geneid, transcript lenght, expected TPM count etc..)
+        genes = "tmp/rsem/{sample}_{reference}.genes.results",
+        #file containing gene level expression estimates (geneid, transcript lenght, expected TPM count etc..)
+        isoforms = "tmp/rsem/{sample}_{reference}.isoforms.results",
+        #Generates the sorted BAM files
+        bam="tmp/rsem/{sample}_{reference}.genome.sorted.bam",
+        bai="tmp/rsem/{sample}_{reference}.genome.sorted.bam.bai",
+    log:
+        "tmp/rsem/calculate_expression_{sample}_{reference}.log", #save a log file of the MAPPING
+    resources:
+        runtime=1440,
+        mem_gb=64,
+    threads: 30
+    shadow: "shallow"
+    params:
+        ref_basename=lambda wc, input, output: re.sub(r"\.seq", "", input.ref_seq),
+        out_basename=lambda wc, input, output: re.sub(r"\.genes.results", "", output.genes),
+    shell:
+        "( rsem-calculate-expression"
+        "   --bowtie2"
+        "   --paired-end"
+        "   --num-threads {threads}"
+        "   --sort-bam-by-coordinate"
+        "   --output-genome-bam"
+        "   {input.r1} {input.r2}"
+        "   {params.ref_basename}" 
+        "   {params.out_basename}"
+        ")&>{log}"    
+
+rule rsem_generate_data_matrix:
+    input:
+        #uses the results of the gene level transcript abundance to create the read count matrix
+        genes=lambda wc: [
+                f"tmp/rsem/{sample}_{wc.reference}.genes.results"
+                for sample in config["SAMPLE_TO_RUNLIB"]
+        ],
+    output:
+        #tsv file with each sample in the input as column and the genes as rows
+        counts="tmp/rsem/RNAna_counts_{reference}.matrix"
+    log:
+        "tmp/rsem/generate_data_matrix_{reference}.log",
+    resources:
+        runtime=120,
+        mem_gb=16,
+    threads: 1
+    shell:
+        "( rsem-generate-data-matrix"
+        "   {input.genes} > {output.counts}"
+        ")&>{log}"
+
 
 wildcard_constraints:
     run="[^/~]+",
     lib="[^/~]+",
     reference="[^/~]+",
     sample="[^/~]+",
-    aligner="[^/~]+",
-
-include: "rules/qc.rules"
-include: "rules/map.rules"
-include: "rules/count.rules"
-
-rule everyting_snakemake_has_to_do:
-    input:
-        qcd_fastqs=[
-            f"tmp/reads/qc/{run}~{lib}_r12.fastq.gz"
-            for run, lib in rl2s
-        ],
-        all_bam=[
-            f"output/counts/{aligner}_{reference}.counts.tsv"
-            for reference in config["map_to"]
-            for aligner in config["map_with"]
-        ],
-        counts=[
-            f"output/counts/{aligner}_{reference}.counts.tsv"
-            for reference in config["map_to"]
-            for aligner in config["map_with"]
-        ],
+    aligner="[^/~]+"
