@@ -1,0 +1,137 @@
+data_paths:
+  metadata:
+    runlib2samp_file: "rawdata/wgs_rl2s.tsv"
+    fastq_prefix: "../kdata/sra"
+    setfile_glob: "rawdata/metadata/samplesets/*.txt"
+  references:
+    ColCC:
+      fasta: "rawdata/references/ColCC/GCA_028009825.2_Col-CC_genomic.fna"
+    TAIR10:
+      fasta: "rawdata/references/TAIR10/TAIR10_fixiupac.fa"
+      region_beds:
+        mpileup: "rawdata/references/TAIR10/TAIR10_fixiupac.fa.50kbp.bed"
+    at9852:
+      fasta: "rawdata/references/dl20/at9852_linewrapped.fasta"
+      region_beds:
+        mpileup: "rawdata/references/dl20/at9852_linewrapped.fasta.50k.bed"
+  kraken:
+    PlusPFP:
+      dir: "/ptmp/kmurray/paco-dbs/kraken2/PlusPFP/2024-01-12"
+      bracken: 150
+    atsphere:
+      dir: "/ptmp/kmurray/paco-dbs/atsphere/2023-03-06_atsphere-curated.k2db+bracken"
+      bracken: 150
+    fungi:
+      dir: "/ptmp/kmurray/paco-dbs/kraken2/2024-11-18_fungi-refseq.kraken2db"
+      bracken: 150
+  gtdb:
+    r220: "rawdata/references/gtdb/release220"
+  metaphlan:
+    mpa_vJun23_CHOCOPhlAnSGB_202403: "rawdata/dbs/metaphylan"
+  diamond:
+    nr: "rawdata/dbs/diamond/nr/2022-04-10_nr/nr.dmnd"
+    uniref90: "rawdata/dbs/diamond/uniref90/uniref90.dmnd"
+  ncbi_taxonomy: "rawdata/dbs/NCBI_taxonomy/2024-10-17/"
+  temp_prefix: "tmp/"
+  persistent_prefix: "output/"
+
+
+#######################################################################
+#                      Sample Set Configuration                       #
+#######################################################################
+#
+# This section is where we tell snakemake which files to generate for each set of samples.
+# Samplesets are configured as files of sample names (see setfile_glob above). 
+
+
+samplesets:
+  all_field_plant:
+    kraken:
+      reads: false
+      bracken: false
+      multiqc: false
+      #bracken: true
+      dbs:
+        - atsphere
+        - PlusPFP
+        - fungi
+    align:
+      aligners:
+        - bwa
+      references:
+        - ColCC
+      unmapped_reads: true
+      stats: true
+      qualimap: false
+    varcall:
+      make_bcfs: false
+      callers:
+        - deepvariant
+      aligners:
+        - bwa
+      refs:
+        - ColCC
+      filters:
+        - raw
+      snpeff: false
+      max_depth_per_sample: 200
+      best_n_alleles: 2
+      min_alt_count: 4
+      ploidy: 2
+      theta_prior: 0.01
+    
+
+tool_settings:
+  # sets a trade-off between compression time and disk usage. If disk is
+  # limiting, increase, if CPUS expensive, decrease. Default should be 6.
+  ziplevel: 1
+  ngm:
+    sensitivity: 0.5
+  adapterremoval:
+    __default__:  # global defaults. modify per qc_type
+      adapter_file: "rawdata/adapters.txt"
+      minqual: 20
+      qualenc: 33
+      maxqualval: 80
+  kwip:
+    kmer_size: 21
+    sketch_size: 300000000
+  mash:
+    kmer_size: 21
+    sketch_size: 100000
+  varcall:
+    # Inference model for DeepVariant. Can be WGS for whole genome shotgun
+    # short reads, or any of  [WGS,WES,PACBIO,ONT_R104,HYBRID_PACBIO_ILLUMINA].
+    # See the deepvariant documentation for more information.
+    deepvariant_model: "WGS"
+
+    # Per-aligner minimum MAPQ thresholds for using a read.
+    minmapq:
+      bwa: 30  # bwa scores approximately follow a PHRED scale (-10*log10(p))
+      ngm: 10  # NGM scores are bonkers, and don't follow a particularly clear scale. In practice ~10 seems appropriate
+
+    # Minimum base quality to count *base* in pileup
+    minbq: 15 
+    
+    # Coverage per region across all samples. This is used to partition the
+    # genome in a coverage-aware manner with goleft indexcov.
+    # The values below are stupidly low for testing purposes, you should
+    # increase the to at least the numbers in the comments.
+    region_coverage_threshold:
+      mpileup:   10000
+      freebayes:  1000
+
+    # Stop counting reads after this many. Per variant caller. It depends on the tool as to whether or not this is per-sample or per-file.
+    max_depth:
+      mpileup:   12000    # Per file
+      freebayes: 12000    # Per file
+
+    # Filters. These are series of command line arguments to pass to bcftools
+    # view. These filters apply while multiallelic variants have been decomposed
+    # into multiple overlapping variant calls. This allows e.g. allele frequency
+    # filters to be performed on a per-allele basis.
+    filters:
+      default: >
+        -i 'QUAL >= 10 &&
+            INFO/DP >= 5 &&
+            INFO/AN >= 3'

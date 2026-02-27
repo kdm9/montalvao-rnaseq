@@ -1,0 +1,174 @@
+# These rules are part of Acanthophis. See https://github.com/kdm9/Acanthophis.
+# This file *could* be modified, but then be careful when you update them. And
+# please, if you find a bug, raise an issue on github so the fix gets shared
+# with everyone.
+#
+# Copyright 2020-2024 Kevin Murray/Gekkonid Consulting
+#
+# This Source Code Form is subject to the terms of the Mozilla Public License,
+# v. 2.0. If a copy of the MPL was not distributed with this file, You can
+# obtain one at http://mozilla.org/MPL/2.0/.
+
+
+def PL(fns):
+    ret = P(fns)
+    if isinstance(ret, str):
+        ret = [ret, ]
+    return ret
+def TL(fns):
+    ret = T(fns)
+    if isinstance(ret, str):
+        ret = [ret, ]
+    return ret
+
+def all_sampleset_files(wc):
+    everything = set()
+    print(f"{wc.sampleset}:")
+    if config["samplesets"][wc.sampleset].get("varcall", {}).get("snpeff", False):
+        print("  - snpeff")
+        everything.update(
+                PL(expand("variants/annotated/{caller}~{aligner}~{ref}~{sampleset}~{filter}~snpEff.vcf.gz",
+                 caller=config["samplesets"][wc.sampleset]["varcall"]["callers"],
+                 aligner=config["samplesets"][wc.sampleset]["varcall"]["aligners"],
+                 ref=config["samplesets"][wc.sampleset]["varcall"]["refs"],
+                 filter=config["samplesets"][wc.sampleset]["varcall"]["filters"],
+                 sampleset=wc.sampleset))
+        )
+
+    if "varcall" in config["samplesets"][wc.sampleset]:
+        print("  - varcall")
+        everything.update(
+               PL(expand("variants/final/{caller}~{aligner}~{ref}~{sampleset}~{filter}.{ext}",
+                      ext=["bcf", "bcf.csi", "vcf.gz", "vcf.gz.csi", "vcf.gz.stats"] if config["tool_settings"].get("varcall", {}).get("make_bcfs", False)
+                       else ["vcf.gz", "vcf.gz.csi", "vcf.gz.stats"],
+                      caller=filter(lambda x: x in ["mpileup", "freebayes"], config["samplesets"][wc.sampleset]["varcall"]["callers"]),
+                      aligner=config["samplesets"][wc.sampleset]["varcall"]["aligners"],
+                      ref=config["samplesets"][wc.sampleset]["varcall"]["refs"],
+                      filter=config["samplesets"][wc.sampleset]["varcall"]["filters"],
+                      sampleset=wc.sampleset))
+        )
+
+        if "deepvariant" in config["samplesets"][wc.sampleset].get("varcall", {}).get("callers", []):
+            everything.update(
+                PL(expand("deepvariant/{aligner}~{ref}~{sampleset}.vcf.gz",
+                       aligner=config["samplesets"][wc.sampleset]["varcall"]["aligners"],
+                       ref=config["samplesets"][wc.sampleset]["varcall"]["refs"],
+                       sampleset=wc.sampleset))
+            )
+
+
+    if "kraken" in config["samplesets"][wc.sampleset]:
+        print("  - kraken_multiqc")
+        everything.update(
+            PL([f"stats/multiqc/kraken_{db}~{wc.sampleset}_multiqc.html"
+               for db in config["samplesets"][wc.sampleset].get("kraken", {}).get("dbs", [])
+            ])
+        )
+
+    if "kraken" in config["samplesets"][wc.sampleset]:
+        print("  - kraken")
+        everything.update(
+            PL(expand("taxonid/kraken/{db}~{sample}_report.txt",
+                     sample=config["SAMPLESETS"][wc.sampleset],
+                     db=config["samplesets"][wc.sampleset].get("kraken", {}).get("dbs", []),
+                     ))
+        )
+
+    if config["samplesets"][wc.sampleset].get("kraken", {}).get("reads", False):
+        print("  - kraken_reads")
+        everything.update(
+            PL(expand("taxonid/kraken/{db}~{sample}_unclassified.fastq.gz",
+                     sample=config["SAMPLESETS"][wc.sampleset],
+                     db=config["samplesets"][wc.sampleset].get("kraken", {}).get("dbs", []),
+                     ))
+        )
+    if config["samplesets"][wc.sampleset].get("persample_reads", False):
+        print("  - sample_reads")
+        everything.update(
+            PL([f"reads/samples/{sample}_{r}.fastq.gz"
+                for r in ["R1", "R2", "se"]
+                for sample in config["SAMPLESETS"][wc.sampleset]
+            ])
+        )
+    
+    if config["samplesets"][wc.sampleset].get("fastqc", False):
+        print("  - fastqc")
+        everything.update(
+            PL([f"stats/fastqc/{prepost}/{run}~{lib}_fastqc.zip"
+              for prepost in ["preqc", "postqc"]
+              for samp in config["SAMPLESETS"][wc.sampleset]
+              for run, lib in config["SAMP2RUNLIB"][samp]])
+        )
+        everything.update(
+            PL([f"stats/multiqc/reads-{prepost}~{wc.sampleset}_multiqc.html"
+              for prepost in ["preqc", "postqc"]])
+        )
+
+    if config["samplesets"][wc.sampleset].get("kwip", False):
+        print("  - kwip")
+        everything.update(
+            PL(expand("kwip/{set}~k{ksize}~s{sketchsize}.dist",
+                   ksize=config["tool_settings"]["kwip"]["kmer_size"],
+                   sketchsize=config["tool_settings"]["kwip"]["sketch_size"],
+                   set=wc.sampleset))
+        )
+
+    if config["samplesets"][wc.sampleset].get("mash", False):
+        print("  - mash")
+        everything.update(
+            PL(expand("mash/{set}~k{ksize}~s{sketchsize}.dist",
+                   ksize=config["tool_settings"]["mash"]["kmer_size"],
+                   sketchsize=config["tool_settings"]["mash"]["sketch_size"],
+                   set=wc.sampleset))
+        )
+
+    if config["samplesets"][wc.sampleset].get("align", {}):
+        print("  - align")
+        everything.update(
+            TL(expand("alignments/samples/{aligner}~{ref}~{sample}.bam",
+                     ref=config["samplesets"][wc.sampleset].get("align", {}).get("references", []),
+                     aligner=config["samplesets"][wc.sampleset].get("align", {}).get("aligners", []),
+                     sample=config["SAMPLESETS"][wc.sampleset]))
+        )
+
+    if config["samplesets"][wc.sampleset].get("align", {}).get("stats", False):
+        print("  - bamstats")
+        everything.update(
+            PL(expand("stats/multiqc/bamstats_{aligner}~{ref}~{sampleset}_multiqc.html",
+                      ref=config["samplesets"][wc.sampleset].get("align", {}).get("references", []),
+                      aligner=config["samplesets"][wc.sampleset].get("align", {}).get("aligners", []),
+                      sampleset=wc.sampleset))
+        )
+    if config["samplesets"][wc.sampleset].get("align", {}).get("qualimap", False):
+        print("  - qualimap")
+        everything.update(
+            PL(expand("stats/multiqc/qualimap_{aligner}~{ref}~{sampleset}_multiqc.html",
+                       ref=config["samplesets"][wc.sampleset].get("align", {}).get("references", []),
+                       aligner=config["samplesets"][wc.sampleset].get("align", {}).get("aligners", []),
+                       sampleset=wc.sampleset))
+        )
+
+    if config["samplesets"][wc.sampleset].get("align", {}).get("unmapped_reads", False):
+        print("  - unmapped_reads")
+        everything.update(
+            PL(expand("alignments/unmapped_reads/{aligner}~{ref}~{sample}_{ext}.fastq.gz",
+                     ref=config["samplesets"][wc.sampleset].get("align", {}).get("references", []),
+                     aligner=config["samplesets"][wc.sampleset].get("align", {}).get("aligners", []),
+                     sample=config["SAMPLESETS"][wc.sampleset],
+                     ext=["R1", "R2", "se",]
+               ))
+        )
+
+    if config["samplesets"][wc.sampleset].get("align", {}).get("sampleset_bams", False):
+        print("  - sampleset_bams")
+        everything.update(
+            PL(expand("alignments/sets/{aligner}~{ref}~{sampleset}.bam",
+                     ref=config["samplesets"][wc.sampleset].get("align", {}).get("references", []),
+                     aligner=config["samplesets"][wc.sampleset].get("align", {}).get("aligners", []),
+                     sampleset=wc.sampleset))
+        )
+    return everything
+
+rule sampleset_everything:
+    input: all_sampleset_files
+    output: touch(P("{sampleset}.done"))

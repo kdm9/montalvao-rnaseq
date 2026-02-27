@@ -1,0 +1,172 @@
+# These rules are part of Acanthophis. See https://github.com/kdm9/Acanthophis.
+# This file *could* be modified, but then be careful when you update them. And
+# please, if you find a bug, raise an issue on github so the fix gets shared
+# with everyone.
+#
+# Copyright 2020-2024 Kevin Murray/Gekkonid Consulting
+#
+# This Source Code Form is subject to the terms of the Mozilla Public License,
+# v. 2.0. If a copy of the MPL was not distributed with this file, You can
+# obtain one at http://mozilla.org/MPL/2.0/.
+
+
+rule deepvariant_gvcf:
+    input:
+        bam=T("alignments/samples/{aligner}~{ref}~{sample}.bam"),
+        bai=T("alignments/samples/{aligner}~{ref}~{sample}.bam.bai"),
+        ref=lambda wc: R(config["data_paths"]["references"][wc.ref]["fasta"], keep_local=True),
+    output:
+        vcf=T("deepvariant/{aligner}~{ref}/{sample}.vcf.gz"),
+        gvcf=T("deepvariant/{aligner}~{ref}/{sample}.g.vcf.gz"),
+    log:
+        T("deepvariant/{aligner}~{ref}/{sample}_examples.log"),
+    container:
+        "docker://google/deepvariant:1.8.0"
+    params:
+        model=lambda wc: config["tool_settings"]["varcall"].get("deepvariant_model", "WGS"),
+        extra="",
+    shadow: "shallow"
+    resources: **rule_resources(config, "deepvariant_gvcf", runtime=600, mem_gb=96, cores=32, disk_mb=400_000)
+    shell:
+        "(  export TMPDIR={output.gvcf}_TRASHME_$RANDOM;"
+        "   mkdir -p $TMPDIR;"
+        '    trap "rm -rf $TMPDIR" EXIT INT;'
+        "   ulimit -s $(ulimit -s -H);"
+        "   ulimit -n $(ulimit -n -H);"
+        " /usr/bin/python3 /opt/deepvariant/bin/run_deepvariant.py"
+        "   --model_type={params.model}"
+        "   --ref={input.ref}"
+        "   --make_examples_extra_args 'normalize_reads=true'"
+        "   --call_variants_extra_args='allow_empty_examples=true'"
+        "   --reads={input.bam}"
+        "   --output_vcf={output.vcf}"
+        "   --output_gvcf={output.gvcf}"
+        "   --intermediate_results_dir=$TMPDIR"
+        "   --num_shards={threads}"
+        ") &> {log}"
+
+
+localrules: glnexus_fofn
+rule glnexus_fofn:
+    input:
+        gvcf=lambda wc: T(expand("deepvariant/{aligner}~{ref}/{sample}.g.vcf.gz",
+                                 aligner=wc.aligner, ref=wc.ref,
+                                 sample=config["SAMPLESETS"][wc.sampleset])),
+    output:
+        T("deepvariant/{aligner}~{ref}~{sampleset}.gvcf_fofn.txt"),
+    run:
+        with open(output[0], "w") as fh:
+            for gvcf in input:
+                print(gvcf, file=fh)
+
+localrules: glnexus_bed_region
+rule glnexus_bed_region:
+    output:
+        bed=T("deepvariant/{aligner}~{ref}~{sampleset}~{region}.bed"),
+    run:
+        with open(output.bed, "w") as fh:
+                c, se = wildcards.region.split(":")
+                s, e = se.split("-")
+                print(c, s, e, sep="\t", file=fh)
+
+rule glnexus_call_region:
+    input:
+        gvcf=lambda wc: T(expand("deepvariant/{aligner}~{ref}/{sample}.g.vcf.gz",
+                                 aligner=wc.aligner, ref=wc.ref,
+                                 sample=config["SAMPLESETS"][wc.sampleset])),
+        fofn=T("deepvariant/{aligner}~{ref}~{sampleset}.gvcf_fofn.txt"),
+        bed=T("deepvariant/{aligner}~{ref}~{sampleset}~{region}.bed"),
+    output:
+        bcf=T("deepvariant/{aligner}~{ref}~{sampleset}~{region}.bcf"),
+    log:
+        T("deepvariant/{aligner}~{ref}~{sampleset}~{region}.bcf.log"),
+    container:
+        "docker://ghcr.io/kdm9/glnexus-bcftools:latest"
+    shadow: "shallow"
+    resources: **rule_resources(config, "glnexus_call", runtime=180, mem_gb=512, cores=128)
+    params:
+        mem_gb=lambda wc, input, output, resources: int(resources.mem_mb/1200),
+    shell:
+        "( rm -rf {output.bcf}_TRASHME/;"
+        "   ulimit -s $(ulimit -s -H);"
+        "   ulimit -n $(ulimit -n -H);"
+        " glnexus_cli"
+        "   --threads {threads}"
+        "   --mem-gb {params.mem_gb}"
+        "   --bed {input.bed}"
+        "   --dir {output.bcf}_TRASHME/"
+        "   --config DeepVariant"
+        "   --list"
+        "   {input.fofn}"
+        "   >{output.bcf}"
+        ") &> {log}"
+
+
+def chrom_regions(faidx):
+    with open(faidx) as fh:
+        for line in fh:
+            chr, length, *_ = line.split()
+            length = int(length)
+            yield f"{chr}:1-{length}"
+
+def chrom_regions2(faidx, winlen=1000000):
+    with open(faidx) as fh:
+        for line in fh:
+            chr, length, *_ = line.split()
+            length = int(length)
+            for start in range(length, winlen):
+                stop = min(length, start+winlen)
+                yield f"{chr}:{start+1}-{stop}"
+
+
+rule deepvariant_idx:
+    input:
+        T("deepvariant/{path}.bcf")
+    output:
+        T("deepvariant/{path}.bcf.csi")
+    resources: **rule_resources(config, "deepvariant_idx", runtime=720, mem_gb=8, cores=1)
+    container: "docker://ghcr.io/kdm9/varcall:latest"
+    shell:
+        "bcftools index -f {input}"
+
+rule glnexus_call_collect:
+    input:
+        bcf=lambda wc: [
+                T(f"deepvariant/{wc.aligner}~{wc.ref}~{wc.sampleset}~{region}.bcf")
+                for region in chrom_regions(R(config["data_paths"]["references"][wc.ref]["fasta"] + ".fai", keep_local=True))
+            ],
+        csi=lambda wc: [
+                T(f"deepvariant/{wc.aligner}~{wc.ref}~{wc.sampleset}~{region}.bcf.csi")
+                for region in chrom_regions(R(config["data_paths"]["references"][wc.ref]["fasta"] + ".fai", keep_local=True))
+            ],
+    output:
+         vcf=P("deepvariant/{aligner}~{ref}~{sampleset}.vcf.gz"),
+    log:
+         P("deepvariant/{aligner}~{ref}~{sampleset}.vcf.gz.log"),
+    resources: **rule_resources(config, "glnexus_call_collect", runtime=1440, mem_gb=140, cores=72)
+    container: "docker://ghcr.io/kdm9/varcall:latest"
+    params:
+    shell:
+        "( bcftools concat"
+        "   --threads {threads}"
+        "   --allow-overlaps"
+        "   --rm-dups all"
+        "   --write-index"
+        "   -Oz8"
+        "   -o {output.vcf}"
+        "   {input.bcf}"
+        " ) >{log} 2>&1"
+
+
+#######################################################################
+#                             Target Rules                            #
+#######################################################################
+rule all_deepvariant:
+    input:
+        [P(expand("deepvariant/{aligner}~{ref}~{sampleset}.vcf.gz",
+               aligner=config["samplesets"][sampleset]["varcall"]["aligners"],
+               ref=config["samplesets"][sampleset]["varcall"]["refs"],
+               sampleset=sampleset))
+         for sampleset in config["samplesets"]
+         if "deepvariant" in config["samplesets"][sampleset].get("varcall", {}).get("callers", [])
+         ],

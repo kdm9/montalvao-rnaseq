@@ -1,0 +1,30 @@
+configfile: "config.yml"
+include: "rules/base.rules"
+populate_metadata(config)
+from snakemake.utils import validate
+validate(config, "config.schema.yml")
+
+
+include: "rules/reads.rules"
+include: "rules/align.rules"
+include: "rules/denovo.rules"
+include: "rules/deepvariant.rules"
+include: "rules/varcall.rules"
+include: "rules/taxonid.rules"
+include: "rules/sampleset.rules"
+
+rule all:
+    input:
+        rules.all_reads.input,
+        rules.all_align.input,
+        rules.all_varcall.input,
+        rules.all_deepvariant.input,
+        rules.all_denovo.input,
+        rules.all_taxonid.input,
+
+#include: "rules/shaddow_readdir.rules"
+
+
+# This must always be put at the end. It scans all rules and updates their
+# resource requests per the config file.
+postprocess_rules(workflow, config)

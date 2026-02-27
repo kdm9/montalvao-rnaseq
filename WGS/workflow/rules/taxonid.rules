@@ -1,0 +1,254 @@
+# These rules are part of Acanthophis. See https://github.com/kdm9/Acanthophis.
+# This file *could* be modified, but then be careful when you update them. And
+# please, if you find a bug, raise an issue on github so the fix gets shared
+# with everyone.
+#
+# Copyright 2016-2024 Kevin Murray/Gekkonid Consulting
+#
+# This Source Code Form is subject to the terms of the Mozilla Public License,
+# v. 2.0. If a copy of the MPL was not distributed with this file, You can
+# obtain one at http://mozilla.org/MPL/2.0/.
+
+#######################################################################
+#                               KRAKEN                                #
+#######################################################################
+
+ruleorder: kraken_noreads > kraken_reads
+rule kraken_noreads:
+    input:
+        reads=lambda wc: T(["reads/runs/{run}~{lib}.fastq.gz".format(run=r, lib=l) for r, l in config["SAMP2RUNLIB"][wc.sample]]),
+        hash=lambda wc: R(config["data_paths"]["kraken"][wc.db]["dir"] + "/hash.k2d", keep_local=True),
+        opts=lambda wc: R(config["data_paths"]["kraken"][wc.db]["dir"] + "/opts.k2d", keep_local=True),
+        taxo=lambda wc: R(config["data_paths"]["kraken"][wc.db]["dir"] + "/taxo.k2d", keep_local=True),
+    output:
+        outtxt=P("taxonid/kraken/{db}~{sample}_output.txt.zst"),
+        report=P("taxonid/kraken/{db}~{sample}_report.txt"),
+    log: L("taxonid/kraken/{db}~{sample}.log"),
+    benchmark: L("taxonid/kraken/{db}~{sample}.bench.csv"),
+    resources: **rule_resources(config, "kraken_noreads", runtime=90, mem_gb=100, disk_gb=24, cores=4)
+    container: "docker://ghcr.io/kdm9/kraken2:latest"
+    params:
+        ziplevel=int(config.get("tool_settings", {}).get('ziplevel', 6)) + 2,
+    shell:
+        "kraken2"
+        "   --db $(dirname {input.hash})"
+        "   --memory-mapping"
+        "   --threads {threads}"
+        "   --use-names"
+        "   --report-minimizer-data"
+        "   --report {output.report}"
+        "   --output >(zstd -T{threads} -{params.ziplevel} >{output.outtxt})"
+        "   <(zcat {input.reads})"
+        "   >{log} 2>&1"
+
+rule kraken_reads:
+    input:
+        reads=lambda wc: T(["reads/runs/{run}~{lib}.fastq.gz".format(run=r, lib=l) for r, l in config["SAMP2RUNLIB"][wc.sample]]),
+        hash=lambda wc: R(config["data_paths"]["kraken"][wc.db]["dir"] + "/hash.k2d", keep_local=True),
+        opts=lambda wc: R(config["data_paths"]["kraken"][wc.db]["dir"] + "/opts.k2d", keep_local=True),
+        taxo=lambda wc: R(config["data_paths"]["kraken"][wc.db]["dir"] + "/taxo.k2d", keep_local=True),
+    output:
+        fastq_un=P("taxonid/kraken/{db}~{sample}_unclassified.fastq.gz"),
+        fastq_cl=P("taxonid/kraken/{db}~{sample}_classified.fastq.gz"),
+        outtxt=P("taxonid/kraken/{db}/{sample}_output.txt.zst"),
+        report=P("taxonid/kraken/{db}~{sample}_report.txt"),
+    log: L("taxonid/kraken/{db}~{sample}.log"),
+    benchmark: L("taxonid/kraken/{db}~{sample}.bench.csv"),
+    resources: **rule_resources(config, "kraken_reads", runtime=90, mem_gb=100, disk_gb=24, cores=4)
+    container: "docker://ghcr.io/kdm9/kraken2:latest"
+    params:
+        ziplevel=config.get("tool_settings", {}).get('ziplevel', 6),
+    shell:
+        "kraken2"
+        "   --db $(dirname {input.hash})"
+        "   --memory-mapping"
+        "   --threads {threads}"
+        "   --use-names"
+        "   --report-minimizer-data"
+        "   --report {output.report}"
+        "   --classified-out >(gzip -{params.ziplevel} >{output.fastq_cl})"
+        "   --unclassified-out >(gzip -{params.ziplevel} >{output.fastq_un})"
+        "   --output >(zstd -T{threads} -{params.ziplevel} >{output.outtxt})"
+        "   <(zcat {input.reads})"
+        "   >{log} 2>&1"
+
+rule bracken:
+    input:
+        report=P("taxonid/kraken/{db}~{sample}_report.txt"),
+        db=lambda wc: directory(R(config["data_paths"]["kraken"][wc.db]["dir"], keep_local=True)),
+    output:
+        report=P("taxonid/bracken/{db}~{sample}~k{len}_brackenreport.txt"),
+        txt=P("taxonid/bracken/{db}~{sample}~k{len}_bracken.txt"),
+    log: L("taxonid/bracken/{db}~{sample}~k{len}.log"),
+    benchmark: L("taxonid/bracken/{db}~{sample}~k{len}.bench.csv"),
+    resources: **rule_resources(config, "bracken", runtime=10, mem_gb=20, disk_gb=24, cores=1)
+    container: "docker://ghcr.io/kdm9/kraken2:latest"
+    shell:
+        "bracken"
+        "   -d {input.db}"
+        "   -i {input.report}"
+        "   -o {output.txt}"
+        "   -w {output.report}"
+        "   -r {wildcards.len}"
+        "   -l S"
+        " &>{log}"
+
+
+rule multiqc_kraken:
+    input:
+        lambda wc: P(expand("taxonid/kraken/{db}~{sample}_report.txt",
+                            sample=config["SAMPLESETS"][wc.sampleset],
+                            db=wc.db,
+                            sampleset=wc.sampleset,
+                   ))
+    output:
+        html=P("stats/multiqc/kraken_{db}~{sampleset}_multiqc.html"),
+    log: L("stats/multiqc/kraken_{db}~{sampleset}_multiqc.log"),
+    benchmark: L("stats/multiqc/kraken_{db}~{sampleset}_multiqc.bench.csv"),
+    container: "docker://multiqc/multiqc:v1.20"
+    resources: **rule_resources(config, "multiqc_kraken", runtime=30, mem_gb=2)
+    shell:
+        "multiqc"
+        "   --no-megaqc-upload"
+        "   --interactive"
+        "   --no-data-dir"
+        "   --comment 'Kraken report for sample set {wildcards.sampleset}'"
+        "   --filename {output.html}"
+        "   {input}"
+        " >{log} 2>&1"
+
+
+#######################################################################
+#                                KAIJU                                #
+#######################################################################
+
+rule kaiju:
+    input:
+        reads=lambda wc: T(["reads/runs/{run}~{lib}.fastq.gz".format(run=r, lib=l) for r, l in config["SAMP2RUNLIB"][wc.sample]]),
+        taxon=lambda wc: R(config["data_paths"]["kaiju"][wc.db]["nodes"], keep_local=True),
+        index=lambda wc: R(config["data_paths"]["kaiju"][wc.db]["fmi"], keep_local=True),
+    output:
+        P("taxonid/kaiju/{db}~{sample}.txt.zst"),
+    log: L("taxonid/kaiju/{db}~{sample}.log"),
+    benchmark: L("taxonid/kaiju/{db}~{sample}.bench.csv"),
+    resources: **rule_resources(config, "kaiju", runtime=90, mem_gb=32, disk_gb=24, cores=4)
+    container: "docker://quay.io/biocontainers/kaiju:1.6.3--hdbcaa40_1"
+    params:
+        ziplevel=int(config.get("tool_settings", {}).get('ziplevel', 6)) + 2,
+    shell:
+        "kaiju"
+        "   -t {input.taxon}"
+        "   -f {input.index}"
+        "   -o >(zstd -T{threads} -{params.ziplevel} >{output})"
+        "   -z {threads}"
+        "   -i <(zcat {input.reads})"
+        "   >{log} 2>&1"
+
+
+#######################################################################
+#                             CENTRIFUGE                              #
+#######################################################################
+
+rule centrifuge:
+    input:
+        db=lambda wc: R(config["data_paths"]["centrifuge"][wc.db], keep_local=True),
+        r1=P("reads/samples/{sample}_R1.fastq.gz"),
+        r2=P("reads/samples/{sample}_R2.fastq.gz"),
+        se=P("reads/samples/{sample}_se.fastq.gz"),
+    output:
+        out=P("taxonid/centrifuge/{db}~{sample}.txt.zst"),
+        report=P("taxonid/centrifuge/{db}~{sample}_report.txt"),
+        metrics=P("taxonid/centrifuge/{db}~{sample}_metrics.txt"),
+    log: L("taxonid/centrifuge/{db}~{sample}.log"),
+    benchmark: L("taxonid/centrifuge/{db}~{sample}.bench.csv"),
+    resources: **rule_resources(config, "centrifuge", runtime=90, mem_gb=16, disk_gb=8, cores=16)
+    container: "docker://quay.io/biocontainers/centrifuge:1.0.4.2--h077b44d_1"
+    params:
+        idx_prefix=lambda wc, input: stripext(input.db, [".1.cf", ".2.cf", ".3.cf", ".4.cf"]),
+        ziplevel=int(config.get("tool_settings", {}).get('ziplevel', 6)) + 2,
+    shell:
+        "centrifuge"
+        "   --shmem"
+        "   --met-file {output.metrics}"
+        "   --report-file {output.report}"
+        "   -S >(zstd -T{threads} -{params.ziplevel} >{output.out})"
+        "   --threads {threads}"
+        "   -x {params.idx_prefix}"
+        "   -1 {input.r1}"
+        "   -2 {input.r2}"
+        "   -U {input.se}"
+        "   >{log} 2>&1"
+
+
+
+#######################################################################
+#                               Targets                               #
+#######################################################################
+
+
+rule all_graftm:
+    input:
+        [P(expand("taxonid/graftm/{db}/{db}~{sample}/",
+                  sample=config["SAMPLESETS"][sampleset],
+                  db=config["samplesets"][sampleset].get("graftm", {}).get("packages", []),
+                  ))
+         for sampleset in config["samplesets"]
+         if "graftm" in config["samplesets"][sampleset]
+        ],
+
+rule all_kaiju:
+    input:
+        [P(expand("taxonid/kaiju/{db}~{sample}.txt.zst",
+                  sample=config["SAMPLESETS"][sampleset],
+                  db=config["samplesets"][sampleset].get("kaiju", {}).get("dbs", []),
+                  ))
+         for sampleset in config["samplesets"]
+         if "kaiju" in config["samplesets"][sampleset]
+        ],
+
+def all_kraken_input(wc):
+    ret = []
+    for sampleset in config["samplesets"]:
+        for db in config["samplesets"][sampleset].get("kraken", {}).get("dbs", []):
+            # always a samplset multiqc
+            if config["samplesets"][sampleset].get("kraken", {}).get("multiqc", False):
+                ret.append(P(f"stats/multiqc/kraken_{db}~{sampleset}_multiqc.html"))
+            # and a kraken report per sample
+            ret.extend(P(expand("taxonid/kraken/{db}~{sample}_report.txt",
+                          sample=config["SAMPLESETS"][sampleset], db=db)))
+    
+            # If we asked for reads, make one per sample
+            if config["samplesets"][sampleset].get("kraken", {}).get("reads", False):
+                ret.extend(P(expand("taxonid/kraken/{db}~{sample}_unclassified.fastq.gz",
+                              sample=config["SAMPLESETS"][sampleset], db=db)))
+
+            # if we have bracken, use the kmer len configured in the data paths
+            # (as it depends on what the DB is built with)
+            bracken_kmer=config["data_paths"]["kraken"][db].get("bracken")
+            if (config["samplesets"][sampleset]["kraken"].get("bracken", False)
+                    and bracken_kmer is not None):
+                ret.extend(P(expand("taxonid/bracken/{db}~{sample}~k{len}_brackenreport.txt",
+                                    sample=config["SAMPLESETS"][sampleset],
+                                    db=db, len=bracken_kmer)))
+    return ret
+rule all_kraken:
+    input:
+        all_kraken_input
+
+
+rule all_centrifuge:
+    input:
+        [P(expand("taxonid/centrifuge/{db}~{sample}.txt.zst",
+                  sample=config["SAMPLESETS"][sampleset],
+                  db=config["samplesets"][sampleset].get("centrifuge", {}).get("dbs", []),
+                  ))
+         for sampleset in config["samplesets"]
+         if "centrifuge" in config["samplesets"][sampleset]
+        ],
+
+
+rule all_taxonid:
+    input:
+        rules.all_kraken.input,
+        rules.all_kaiju.input,
+        rules.all_centrifuge.input,
