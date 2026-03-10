@@ -15,10 +15,14 @@ except ImportError:
         yield from iter
 
 def upload_with_md5sum(ftp, path: Path, upname: str) -> str:
-    with path.open("rb") as fh:
-        hash = hashlib.file_digest(fh, "md5")
-        ftp.storbinary(f"STOR {upname}", fh, callback=hash.update)
-        return hash.hexdigest()
+    size = path.stat().st_size
+    hash = hashlib.md5()
+    with path.open("rb") as fh, tqdm(total=size, unit="B", unit_scale=True, desc=upname, file=stderr) as pbar:
+        def callback(block):
+            hash.update(block)
+            pbar.update(len(block))
+        ftp.storbinary(f"STOR {upname}", fh, callback=callback)
+    return hash.hexdigest()
     
 def fastq_export(ftp,  libname: str, r1path: Path, r2path: Path):
     r1 = f"{libname}_R1.fastq.gz"
