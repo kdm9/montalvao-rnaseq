@@ -8,21 +8,19 @@ from sys import stdout, stderr
 import shutil
 import ftplib
 import os
-try:
-    from tqdm.auto import tqdm
-except ImportError:
-    def tqdm(iter, *args, **kwargs):
-        yield from iter
+from tqdm.auto import tqdm
 
 def upload_with_md5sum(ftp, path: Path, upname: str) -> str:
     size = path.stat().st_size
     hash = hashlib.md5()
-    with path.open("rb") as fh, tqdm(total=size, unit="B", unit_scale=True, desc=upname, file=stderr) as pbar:
+    with path.open("rb") as fh, tqdm(total=size, unit="B", unit_scale=True, desc=upname, file=stderr, leave=False) as pbar:
         def callback(block):
             hash.update(block)
             pbar.update(len(block))
         ftp.storbinary(f"STOR {upname}", fh, callback=callback)
-    return hash.hexdigest()
+    md5 = hash.hexdigest()
+    print(f"STOR {upname} {md5} {size/1e6:0.0f}M", file=stderr)
+    return md5
     
 def fastq_export(ftp,  libname: str, r1path: Path, r2path: Path):
     r1 = f"{libname}_R1.fastq.gz"
@@ -58,7 +56,7 @@ def main(argv=None):
         ofields = list(set(icsv.fieldnames) | set(("forward_file_md5", "reverse_file_md5")))
         ocsv = csv.DictWriter(stdout, fieldnames=ofields, dialect="excel-tab")
         ocsv.writeheader()
-        for rec in tqdm(icsv):
+        for rec in icsv:
             fwd_file = args.basedir / rec["forward_file_name"] 
             rev_file = args.basedir / rec["reverse_file_name"] 
             rec.update(fastq_export(ftp, rec["library_name"], fwd_file, rev_file))
