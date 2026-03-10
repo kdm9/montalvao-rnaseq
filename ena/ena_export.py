@@ -6,28 +6,30 @@ import csv
 import hashlib
 from sys import stdout, stderr
 import shutil
+import ftplib
+import os
 try:
     from tqdm.auto import tqdm
 except ImportError:
     def tqdm(iter, *args, **kwargs):
         yield from iter
 
-def md5sum(path: Path):
+def upload_with_md5sum(ftp, path: Path, upname: str) -> str:
     with path.open("rb") as fh:
         hash = hashlib.file_digest(fh, "md5")
+        ftp.storbinary(f"STOR {upname}", fh, callback=hash.update)
         return hash.hexdigest()
     
-def fastq_export(outdir: Path, libname: str, r1path: Path, r2path: Path):
-    r1out = outdir/f"{libname}_R1.fastq.gz"
-    shutil.copyfile(r1path, r1out)
-    r2out = outdir/f"{libname}_R2.fastq.gz"
-    shutil.copyfile(r2path, r2out)
-    
+def fastq_export(ftp,  libname: str, r1path: Path, r2path: Path):
+    r1 = f"{libname}_R1.fastq.gz"
+    r1md5 = upload_with_md5sum(ftp, r1path, r1)
+    r2 = f"{libname}_R2.fastq.gz"
+    r2md5 = upload_with_md5sum(ftp, r2path, r2)
     return {
-        "forward_file_name": r1out.name,
-        "forward_file_md5": md5sum(r1out),
-        "reverse_file_name": r2out.name,
-        "reverse_file_md5": md5sum(r2out),
+        "forward_file_name": r1,
+        "forward_file_md5": r1md5,
+        "reverse_file_name": r2,
+        "reverse_file_md5": r2md5,
     }
 
 
@@ -41,14 +43,23 @@ def main(argv=None):
                     help="Basename for all inputs")
     args = ap.parse_args(argv)
 
-    with args.tsv.open() as fh:
+    args.outdir.mkdir(exist_ok=True)
+
+    user = os.environ["WEBIN_USER"]
+    pass = os.environ["WEBIN_PASS"]
+
+    with args.tsv.open() as fh, ftplib.FTP(host="webin2.ebi.ac.uk", user=user, passwd=pass) as ftp:
+        ftp.login()
         icsv = csv.DictReader(fh, dialect="excel-tab")
-        ofields = list(set(icsv.fieldnames) | set("forward_file_md5", "reverse_file_md5"))
-        print(ofields, file=stderr)
+        ofields = list(set(icsv.fieldnames) | set(("forward_file_md5", "reverse_file_md5")))
         ocsv = csv.DictWriter(stdout, fieldnames=ofields, dialect="excel-tab")
         ocsv.writeheader()
         for rec in tqdm(icsv):
             fwd_file = args.basedir / rec["forward_file_name"] 
             rev_file = args.basedir / rec["reverse_file_name"] 
-            rec.update(fastq_export(args.outdir, rec["library_name"], fwd_file, rev_file))
+            rec.update(fastq_export(ftp, rec["library_name"], fwd_file, rev_file))
             ocsv.writerow(rec)
+            stdout.flush()
+
+if __name__ == "__main__":
+    main()
