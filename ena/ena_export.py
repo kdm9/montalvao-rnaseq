@@ -46,9 +46,9 @@ def main(argv=None):
     args.outdir.mkdir(exist_ok=True)
 
     user = os.environ["WEBIN_USER"]
-    pass = os.environ["WEBIN_PASS"]
+    passwd = os.environ["WEBIN_PASS"]
 
-    with args.tsv.open() as fh, ftplib.FTP(host="webin2.ebi.ac.uk", user=user, passwd=pass) as ftp:
+    with args.tsv.open() as fh, ftplib.FTP(host="webin2.ebi.ac.uk", user=user, passwd=passwd) as ftp:
         ftp.login()
         icsv = csv.DictReader(fh, dialect="excel-tab")
         ofields = list(set(icsv.fieldnames) | set(("forward_file_md5", "reverse_file_md5")))
