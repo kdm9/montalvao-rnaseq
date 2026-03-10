@@ -13,12 +13,6 @@ ena = read_tsv("sample_accessions.tsv") |>
 
 ena2 = ena |>
     left_join(allfq, by=join_by(ALIAS==sample)) |>
-    glimpse()  |>
-    write_tsv("all_fq.tsv", na="")
-
-
-
-ena2 |>
     filter(is.na(exclude_why)) |>
     transmute(
         sample=ACCESSION, 
@@ -41,6 +35,8 @@ ena2 |>
         forward_file_name=read1_uri,
         reverse_file_name=read2_uri,
     ) |>
+    write_tsv("all_fq.tsv", na="") |>
     glimpse()
+
 
 
